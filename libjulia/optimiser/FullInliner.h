@@ -89,7 +89,7 @@ public:
 	std::vector<Statement> operator()(Block& _block);
 
 private:
-	std::vector<Statement> visitVector(std::vector<Statement>& _statements);
+	std::vector<Statement> visitVector(std::vector<Statement>& _statements, std::vector<std::string> const& _types, bool _moveToFront = false);
 	std::vector<Statement> tryInline(Statement& _statement);
 
 	std::string newName(std::string const& _prefix);

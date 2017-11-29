@@ -203,6 +203,17 @@ inline std::vector<T> operator+(std::vector<T> const& _a, std::vector<T> const& 
 	ret += _b;
 	return ret;
 }
+/// Concatenate two vectors of elements, moving them.
+template <class T>
+inline std::vector<T> operator+(std::vector<T>&& _a, std::vector<T>&& _b)
+{
+	std::vector<T> ret(std::move(_a));
+	if (&_a == &_b)
+		ret += ret;
+	else
+		ret += std::move(_b);
+	return ret;
+}
 
 template <class T, class V>
 bool contains(T const& _t, V const& _v)

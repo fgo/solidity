@@ -60,17 +60,11 @@ FullInliner::FullInliner(Block& _block)
 
 vector<Statement> FullInliner::operator()(FunctionalInstruction& _instr)
 {
-	// TODO if one of the arguments is inlined, everything right of it
-	// has to be moved to the prefix statements to keep the evaluation
-	// order the same
 	return visitVector(_instr.arguments);
 }
 
 vector<Statement> FullInliner::operator()(FunctionCall& _funCall)
 {
-	// TODO if one of the arguments is inlined, everything right of it
-	// has to be moved to the prefix statements to keep the evaluation
-	// order the same
 	return visitVector(_funCall.arguments);
 }
 
@@ -142,14 +136,34 @@ vector<Statement> FullInliner::operator()(Block& _block)
 
 vector<Statement> FullInliner::visitVector(vector<Statement>& _statements)
 {
+	// If one of the elements is inlined, all other elements right of it
+	// also have to be inlined to keep the order of evaluation.
 	vector<Statement> prefix;
-	for (auto& arg: _statements | boost::adaptors::reversed)
+	bool moveToPrefix = false;
+	for (auto& arg: _statements)
 	{
+		// TODO optimize vector operations, check that it actually moves
 		vector<Statement> argPrefix = tryInline(arg);
-		prefix += std::move(argPrefix);
-		// Check that it actually moved.
-		// TODO
-		//solAssert(argPrefix.empty(), "");
+		if (!argPrefix.empty())
+		{
+			moveToPrefix = true;
+			// We go through the arguments left to right, so we have to invert
+			// the prefixes.
+			prefix = std::move(argPrefix) + std::move(prefix);
+		}
+		else if (moveToPrefix)
+		{
+			// TODO combine this code with the one in tryInline()
+			string var = newName("");
+			prefix.insert(0, VariableDeclaration{
+				arg.location,
+				{{TypedName{funCall.location, var, /*fun.arguments[i].type*/}}},
+							  make_shared<Statement>(std::move(funCall.arguments[i]))
+						  }
+						  );
+			arg = Identifier{funCall.location, var};
+
+		}
 	}
 	return prefix;
 }
@@ -174,6 +188,7 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 	for (int i = funCall.arguments.size() - 1; i >= 0; --i)
 	{
 		prefixStatements += tryInline(funCall.arguments[i]);
+		// TODO: add function name
 		string var = newName(fun.arguments[i].name);
 		variableReplacements[fun.arguments[i].name] = var;
 		prefixStatements.emplace_back(VariableDeclaration{
@@ -182,6 +197,7 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 			make_shared<Statement>(std::move(funCall.arguments[i]))
 		});
 	}
+	// TODO: add function name
 	variableReplacements[fun.returns[0].name] = newName(fun.returns[0].name);
 	prefixStatements.emplace_back(VariableDeclaration{
 		funCall.location,
@@ -189,6 +205,8 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 		{}
 	});
 	prefixStatements.emplace_back(BodyCopier(m_nameDispenser, variableReplacements)(fun.body));
+	// TODO this may lead to infinite recursion.
+	tryInline(prefixStatements.back());
 	_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
 	return prefixStatements;
 }
@@ -200,6 +218,7 @@ string FullInliner::newName(string const& _prefix)
 
 Statement BodyCopier::operator()(VariableDeclaration const& _varDecl)
 {
+	// TODO: add function name
 	for (auto const& var: _varDecl.variables)
 		m_variableReplacements[var.name] = m_nameDispenser.newName(var.name);
 	return ASTCopier::operator()(_varDecl);
