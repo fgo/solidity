@@ -21,6 +21,7 @@
 #include <libjulia/optimiser/FullInliner.h>
 
 #include <libjulia/optimiser/ASTCopier.h>
+#include <libjulia/optimiser/ASTWalker.h>
 
 #include <libsolidity/inlineasm/AsmData.h>
 
@@ -34,31 +35,43 @@ using namespace std;
 using namespace dev;
 using namespace dev::julia;
 using namespace dev::solidity;
-using namespace dev::solidity::assembly;
 
-void FullInliner::run()
+
+string NameDispenser::newName(string const& _prefix)
 {
-	(*this)(m_block);
+	string name = _prefix;
+	size_t suffix = 0;
+	while (m_usedNames.count(name))
+	{
+		suffix++;
+		name = _prefix + "_" + std::to_string(suffix);
+	}
+	m_usedNames.insert(name);
+	return name;
+}
+
+FullInliner::FullInliner(Block& _block)
+{
+	m_astCopy = make_shared<Block>(boost::get<Block>(ASTCopier()(_block)));
+	m_nameCollector = make_shared<NameCollector>();
+	(*m_nameCollector)(*m_astCopy);
+	m_nameDispenser.m_usedNames = m_nameCollector->names();
 }
 
 vector<Statement> FullInliner::operator()(FunctionalInstruction& _instr)
 {
-	vector<Statement> prefix;
-
-	for (auto& arg: _instr.arguments | boost::adaptors::reversed)
-	{
-		vector<Statement> argPrefix = tryInline(arg);
-		prefix += std::move(argPrefix);
-		// Check that it actually moved.
-		solAssert(argPrefix.empty(), "");
-	}
-	return prefix;
+	// TODO if one of the arguments is inlined, everything right of it
+	// has to be moved to the prefix statements to keep the evaluation
+	// order the same
+	return visitVector(_instr.arguments);
 }
 
-vector<Statement> FullInliner::operator()(FunctionCall&)
+vector<Statement> FullInliner::operator()(FunctionCall& _funCall)
 {
-	solAssert(false, "Should have called tryInline instead.");
-	return {};
+	// TODO if one of the arguments is inlined, everything right of it
+	// has to be moved to the prefix statements to keep the evaluation
+	// order the same
+	return visitVector(_funCall.arguments);
 }
 
 vector<Statement> FullInliner::operator()(Assignment& _assignment)
@@ -127,78 +140,81 @@ vector<Statement> FullInliner::operator()(Block& _block)
 	return {};
 }
 
-vector<Statement> FullInliner::tryInline(Statement& _statement)
+vector<Statement> FullInliner::visitVector(vector<Statement>& _statements)
 {
-	if (_statement.type() == typeid(FunctionCall))
+	vector<Statement> prefix;
+	for (auto& arg: _statements | boost::adaptors::reversed)
 	{
-//		FunctionCall& funCall = boost::get<FunctionCall>(_statement);
-//		bool allArgsPure = true;
-
-//		for (auto& arg: funCall.arguments)
-//			if (!tryInline(arg))
-//				allArgsPure = false;
-//		// TODO: Could this have distorted the code so that a simple replacement does not
-//		// work anymore?
-
-//		if (allArgsPure && m_inlinableFunctions.count(funCall.functionName.name))
-//		{
-//			FunctionDefinition const& fun = *m_inlinableFunctions.at(funCall.functionName.name);
-//			map<string, Statement const*> replacements;
-//			for (size_t i = 0; i < fun.arguments.size(); ++i)
-//				replacements[fun.arguments[i].name] = &funCall.arguments[i];
-//			_statement = replace(*boost::get<Assignment>(fun.body.statements.front()).value, replacements);
-
-//			// TODO actually in the process of inlining, we could also make a funciton non-inlinable
-//			// because it could now call itself
-
-//			// Pureness of this depends on the pureness of the replacement,
-//			// i.e. the pureness of the function itself.
-//			// Perhaps we can just re-run?
-
-//			// If two functions call each other, we have to exit after some iterations.
-
-//			// Just return false for now.
-//			return false;
-//		}
-//		else
-//			return allArgsPure;
-		return {};
+		vector<Statement> argPrefix = tryInline(arg);
+		prefix += std::move(argPrefix);
+		// Check that it actually moved.
+		// TODO
+		//solAssert(argPrefix.empty(), "");
 	}
-	else
-		return boost::apply_visitor(*this, _statement);
+	return prefix;
 }
 
-Statement FullInliner::replace(Statement const& _statement, map<string, Statement const*> const& _replacements)
+vector<Statement> FullInliner::tryInline(Statement& _statement)
 {
-	if (_statement.type() == typeid(FunctionCall))
-	{
-		FunctionCall const& funCall = boost::get<FunctionCall>(_statement);
-		vector<Statement> arguments;
-		for (auto const& arg: funCall.arguments)
-			arguments.push_back(replace(arg, _replacements));
+	if (_statement.type() != typeid(FunctionCall))
+		return boost::apply_visitor(*this, _statement);
 
-		return FunctionCall{funCall.location, funCall.functionName, std::move(arguments)};
-	}
-	else if (_statement.type() == typeid(FunctionalInstruction))
-	{
-		FunctionalInstruction const& instr = boost::get<FunctionalInstruction>(_statement);
-		vector<Statement> arguments;
-		for (auto const& arg: instr.arguments)
-			arguments.push_back(replace(arg, _replacements));
+	FunctionCall& funCall = boost::get<FunctionCall>(_statement);
+	if (m_functionScopes.count(funCall.functionName.name))
+		return (*this)(funCall);
 
-		return FunctionalInstruction{instr.location, instr.instruction, std::move(arguments)};
-	}
-	else if (_statement.type() == typeid(Identifier))
-	{
-		string const& name = boost::get<Identifier>(_statement).name;
-		if (_replacements.count(name))
-			return replace(*_replacements.at(name), {});
-		else
-			return _statement;
-	}
-	else if (_statement.type() == typeid(Literal))
-		return _statement;
+	// TODO: Insert good heuristic here.
 
-	solAssert(false, "");
-	return {};
+	FunctionDefinition const& fun = *m_nameCollector->functions().at(funCall.functionName.name);
+	solUnimplementedAssert(fun.returns.size() == 1, "");
+
+	vector<Statement> prefixStatements;
+	map<string, string> variableReplacements;
+
+	for (int i = funCall.arguments.size() - 1; i >= 0; --i)
+	{
+		prefixStatements += tryInline(funCall.arguments[i]);
+		string var = newName(fun.arguments[i].name);
+		variableReplacements[fun.arguments[i].name] = var;
+		prefixStatements.emplace_back(VariableDeclaration{
+			funCall.location,
+			{{TypedName{funCall.location, var, fun.arguments[i].type}}},
+			make_shared<Statement>(std::move(funCall.arguments[i]))
+		});
+	}
+	variableReplacements[fun.returns[0].name] = newName(fun.returns[0].name);
+	prefixStatements.emplace_back(VariableDeclaration{
+		funCall.location,
+		{{funCall.location, variableReplacements[fun.returns[0].name], fun.returns[0].type}},
+		{}
+	});
+	prefixStatements.emplace_back(BodyCopier(m_nameDispenser, variableReplacements)(fun.body));
+	_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
+	return prefixStatements;
+}
+
+string FullInliner::newName(string const& _prefix)
+{
+	return m_nameDispenser.newName(_prefix);
+}
+
+Statement BodyCopier::operator()(VariableDeclaration const& _varDecl)
+{
+	for (auto const& var: _varDecl.variables)
+		m_variableReplacements[var.name] = m_nameDispenser.newName(var.name);
+	return ASTCopier::operator()(_varDecl);
+}
+
+Statement BodyCopier::operator()(FunctionDefinition const& _funDef)
+{
+	solAssert(false, "Function hoisting has to be done before function inlining.");
+	return _funDef;
+}
+
+string BodyCopier::translateIdentifier(string const& _name)
+{
+	if (m_variableReplacements.count(_name))
+		return m_variableReplacements.at(_name);
+	else
+		return _name;
 }

@@ -21,6 +21,8 @@
 
 #include <libjulia/Aliases.h>
 
+#include <libjulia/optimiser/ASTCopier.h>
+
 #include <libsolidity/interface/Exceptions.h>
 
 #include <boost/variant.hpp>
@@ -33,6 +35,15 @@ namespace dev
 namespace julia
 {
 
+class NameCollector;
+
+struct NameDispenser
+{
+	std::string newName(std::string const& _prefix);
+	std::set<std::string> m_usedNames;
+};
+
+
 /**
  * Optimiser component that modifies an AST in place, inlining arbitrary functions.
  *
@@ -43,7 +54,7 @@ namespace julia
  *
  * is transformed into
  *
- * function f(a, b) -> c, d { ... }
+ * function f(a, b) -> c { ... }
  *
  * let z1 := z(...) let y1 := f(...) let a2 := arg2(...) let a1 := arg1(...)
  * let c1 := 0
@@ -59,14 +70,9 @@ namespace julia
 class FullInliner: public boost::static_visitor<std::vector<Statement>>
 {
 public:
-	FullInliner(Block& _block):
-		m_block(_block)
-	{}
+	explicit FullInliner(Block& _block);
 
-	void run();
-
-	// These return statements to be prefixed as soon as we reach the block layer.
-
+	// The return values are statements to be prefixed as soon as we reach the block layer.
 	std::vector<Statement> operator()(Literal&) { return {}; }
 	std::vector<Statement> operator()(Instruction&) { solAssert(false, ""); return {}; }
 	std::vector<Statement> operator()(Identifier&) { return {}; }
@@ -83,13 +89,47 @@ public:
 	std::vector<Statement> operator()(Block& _block);
 
 private:
+	std::vector<Statement> visitVector(std::vector<Statement>& _statements);
 	std::vector<Statement> tryInline(Statement& _statement);
-	Statement replace(Statement const& _statement, std::map<std::string, Statement const*> const& _replacements);
+
+	std::string newName(std::string const& _prefix);
+
+	/// Full independent copy of the AST. This is where we take the function code from.
+	/// This would not be needed if we could look up functions by name in some kind of
+	/// dynamic way.
+	std::shared_ptr<Block> m_astCopy;
 
 	/// The functions we are inside of (we cannot inline them).
 	std::set<std::string> m_functionScopes;
+	std::shared_ptr<NameCollector> m_nameCollector;
+	NameDispenser m_nameDispenser;
+};
 
-	solidity::assembly::Block& m_block;
+/**
+ * Creates a copy of a block that is supposed to be the body of a function.
+ * Applies replacements to referenced variables and creates new names for
+ * variable declarations.
+ */
+class BodyCopier: public ASTCopier
+{
+public:
+	BodyCopier(
+		NameDispenser& _nameDispenser,
+		std::map<std::string, std::string> const& _variableReplacements
+	):
+		m_nameDispenser(_nameDispenser),
+		m_variableReplacements(_variableReplacements)
+	{}
+
+	using ASTCopier::operator ();
+
+	virtual Statement operator()(VariableDeclaration const& _varDecl) override;
+	virtual Statement operator()(FunctionDefinition const& _funDef) override;
+
+	virtual std::string translateIdentifier(std::string const& _name) override;
+
+	NameDispenser& m_nameDispenser;
+	std::map<std::string, std::string> m_variableReplacements;
 };
 
 
