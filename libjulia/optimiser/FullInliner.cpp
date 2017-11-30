@@ -41,7 +41,7 @@ string NameDispenser::newName(string const& _prefix)
 {
 	string name = _prefix;
 	size_t suffix = 0;
-	while (m_usedNames.count(name))
+	while (name.empty() || m_usedNames.count(name))
 	{
 		suffix++;
 		name = _prefix + "_" + std::to_string(suffix);
@@ -60,12 +60,13 @@ FullInliner::FullInliner(Block& _block)
 
 vector<Statement> FullInliner::operator()(FunctionalInstruction& _instr)
 {
-	return visitVector(_instr.arguments);
+	return visitVector(_instr.arguments, {}, {});
 }
 
-vector<Statement> FullInliner::operator()(FunctionCall& _funCall)
+vector<Statement> FullInliner::operator()(FunctionCall&)
 {
-	return visitVector(_funCall.arguments);
+	solAssert(false, "Should have called tryInline().");
+	return {};
 }
 
 vector<Statement> FullInliner::operator()(Assignment& _assignment)
@@ -134,35 +135,38 @@ vector<Statement> FullInliner::operator()(Block& _block)
 	return {};
 }
 
-vector<Statement> FullInliner::visitVector(vector<Statement>& _statements)
+vector<Statement> FullInliner::visitVector(
+	vector<Statement>& _statements,
+	vector<string> const& _nameHints,
+	vector<string> const& _types,
+	bool _moveToFront
+)
 {
-	// If one of the elements is inlined, all other elements right of it
-	// also have to be inlined to keep the order of evaluation.
+	// If one of the elements moves parts to the front, all other elements right of it
+	// also have to be moved to the front to keep the order of evaluation.
 	vector<Statement> prefix;
-	bool moveToPrefix = false;
-	for (auto& arg: _statements)
+	for (size_t i = 0; i < _statements.size(); ++i)
 	{
+		auto& arg = _statements[i];
 		// TODO optimize vector operations, check that it actually moves
 		vector<Statement> argPrefix = tryInline(arg);
 		if (!argPrefix.empty())
 		{
-			moveToPrefix = true;
+			_moveToFront = true;
 			// We go through the arguments left to right, so we have to invert
 			// the prefixes.
 			prefix = std::move(argPrefix) + std::move(prefix);
 		}
-		else if (moveToPrefix)
+		else if (_moveToFront)
 		{
-			// TODO combine this code with the one in tryInline()
-			string var = newName("");
-			prefix.insert(0, VariableDeclaration{
-				arg.location,
-				{{TypedName{funCall.location, var, /*fun.arguments[i].type*/}}},
-							  make_shared<Statement>(std::move(funCall.arguments[i]))
-						  }
-						  );
-			arg = Identifier{funCall.location, var};
-
+			auto location = locationOf(arg);
+			string var = newName(i < _nameHints.size() ? _nameHints[i] : "");
+			prefix.emplace(prefix.begin(), VariableDeclaration{
+				location,
+				{{TypedName{location, var, i < _types.size() ? _types[i] : ""}}},
+				make_shared<Statement>(std::move(arg))
+			});
+			arg = Identifier{location, var};
 		}
 	}
 	return prefix;
@@ -174,40 +178,42 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 		return boost::apply_visitor(*this, _statement);
 
 	FunctionCall& funCall = boost::get<FunctionCall>(_statement);
-	if (m_functionScopes.count(funCall.functionName.name))
-		return (*this)(funCall);
 
 	// TODO: Insert good heuristic here.
+	bool doInline = !m_functionScopes.count(funCall.functionName.name);
 
 	FunctionDefinition const& fun = *m_nameCollector->functions().at(funCall.functionName.name);
 	solUnimplementedAssert(fun.returns.size() == 1, "");
 
 	vector<Statement> prefixStatements;
-	map<string, string> variableReplacements;
-
-	for (int i = funCall.arguments.size() - 1; i >= 0; --i)
 	{
-		prefixStatements += tryInline(funCall.arguments[i]);
-		// TODO: add function name
-		string var = newName(fun.arguments[i].name);
-		variableReplacements[fun.arguments[i].name] = var;
+		vector<string> argNames;
+		vector<string> argTypes;
+		for (auto const& arg: fun.arguments)
+		{
+			argNames.push_back(fun.name + "_" + arg.name);
+			argTypes.push_back(arg.type);
+		}
+		prefixStatements = visitVector(funCall.arguments, argNames, argTypes, doInline);
+	}
+
+	if (doInline)
+	{
+		map<string, string> variableReplacements;
+		for (size_t i = 0; i < funCall.arguments.size(); ++i)
+			variableReplacements[fun.arguments[i].name] = boost::get<Identifier>(funCall.arguments[i]).name;
+		variableReplacements[fun.returns[0].name] = newName(fun.name + "_" + fun.returns[0].name);
+
 		prefixStatements.emplace_back(VariableDeclaration{
 			funCall.location,
-			{{TypedName{funCall.location, var, fun.arguments[i].type}}},
-			make_shared<Statement>(std::move(funCall.arguments[i]))
+			{{funCall.location, variableReplacements[fun.returns[0].name], fun.returns[0].type}},
+			{}
 		});
+		prefixStatements.emplace_back(BodyCopier(m_nameDispenser, fun.name + "_", variableReplacements)(fun.body));
+		// TODO this may lead to infinite recursion.
+		tryInline(prefixStatements.back());
+		_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
 	}
-	// TODO: add function name
-	variableReplacements[fun.returns[0].name] = newName(fun.returns[0].name);
-	prefixStatements.emplace_back(VariableDeclaration{
-		funCall.location,
-		{{funCall.location, variableReplacements[fun.returns[0].name], fun.returns[0].type}},
-		{}
-	});
-	prefixStatements.emplace_back(BodyCopier(m_nameDispenser, variableReplacements)(fun.body));
-	// TODO this may lead to infinite recursion.
-	tryInline(prefixStatements.back());
-	_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
 	return prefixStatements;
 }
 
@@ -220,7 +226,7 @@ Statement BodyCopier::operator()(VariableDeclaration const& _varDecl)
 {
 	// TODO: add function name
 	for (auto const& var: _varDecl.variables)
-		m_variableReplacements[var.name] = m_nameDispenser.newName(var.name);
+		m_variableReplacements[var.name] = m_nameDispenser.newName(m_varNamePrefix + var.name);
 	return ASTCopier::operator()(_varDecl);
 }
 

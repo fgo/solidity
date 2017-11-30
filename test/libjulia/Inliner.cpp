@@ -187,6 +187,20 @@ BOOST_AUTO_TEST_CASE(simple)
 	);
 }
 
+BOOST_AUTO_TEST_CASE(move_up_rightwards_arguments)
+{
+	BOOST_CHECK_EQUAL(
+		fullInline(R"({
+			function f(a, b, c) -> x { x := add(a, b) x := mul(x, c) }
+			let y := add(mload(1), add(f(mload(2), mload(3), mload(4)), mload(5)))
+		})", false),
+		format(R"({
+			function f(a) -> x { x := add(a, a) }
+			function g(b, c) -> y { y := mul(mload(c), add(b, b)) }
+			let y_1 := mul(mload(7), add(calldatasize(), calldatasize()))
+		})", false)
+	);
+}
 
 // TODO test double recursive calls with functional inliner
 

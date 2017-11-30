@@ -89,7 +89,17 @@ public:
 	std::vector<Statement> operator()(Block& _block);
 
 private:
-	std::vector<Statement> visitVector(std::vector<Statement>& _statements, std::vector<std::string> const& _types, bool _moveToFront = false);
+	/// Visits a list of statements (usually an argument list to a function call) and tries
+	/// to inline them. If one of them is inlined, all right of it have to be moved to the front
+	/// (to keep the order of evaluation). If @a _moveToFront is true, all elements are moved
+	/// to the front. @a _nameHints and @_types are used for the newly created variables, but
+	/// both can be empty.
+	std::vector<Statement> visitVector(
+		std::vector<Statement>& _statements,
+		std::vector<std::string> const& _nameHints,
+		std::vector<std::string> const& _types,
+		bool _moveToFront = false
+	);
 	std::vector<Statement> tryInline(Statement& _statement);
 
 	std::string newName(std::string const& _prefix);
@@ -115,9 +125,11 @@ class BodyCopier: public ASTCopier
 public:
 	BodyCopier(
 		NameDispenser& _nameDispenser,
+		std::string const& _varNamePrefix,
 		std::map<std::string, std::string> const& _variableReplacements
 	):
 		m_nameDispenser(_nameDispenser),
+		m_varNamePrefix(_varNamePrefix),
 		m_variableReplacements(_variableReplacements)
 	{}
 
@@ -129,6 +141,7 @@ public:
 	virtual std::string translateIdentifier(std::string const& _name) override;
 
 	NameDispenser& m_nameDispenser;
+	std::string const& m_varNamePrefix;
 	std::map<std::string, std::string> m_variableReplacements;
 };
 
