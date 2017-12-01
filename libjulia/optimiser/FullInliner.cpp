@@ -211,6 +211,7 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 		});
 		prefixStatements.emplace_back(BodyCopier(m_nameDispenser, fun.name + "_", variableReplacements)(fun.body));
 		// TODO this may lead to infinite recursion.
+		// TODO this is does duplicate work, because it inlines after having copied
 		tryInline(prefixStatements.back());
 		_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
 	}
