@@ -22,6 +22,7 @@
 
 #include <libjulia/optimiser/ASTCopier.h>
 #include <libjulia/optimiser/ASTWalker.h>
+#include <libjulia/optimiser/NameCollector.h>
 
 #include <libsolidity/inlineasm/AsmData.h>
 
@@ -183,13 +184,13 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 	bool doInline = !m_functionScopes.count(funCall.functionName.name);
 
 	FunctionDefinition const& fun = *m_nameCollector->functions().at(funCall.functionName.name);
-	solUnimplementedAssert(fun.returns.size() == 1, "");
+	solUnimplementedAssert(fun.returnVariables.size() == 1, "");
 
 	vector<Statement> prefixStatements;
 	{
 		vector<string> argNames;
 		vector<string> argTypes;
-		for (auto const& arg: fun.arguments)
+		for (auto const& arg: fun.parameters)
 		{
 			argNames.push_back(fun.name + "_" + arg.name);
 			argTypes.push_back(arg.type);
@@ -200,20 +201,21 @@ vector<Statement> FullInliner::tryInline(Statement& _statement)
 	if (doInline)
 	{
 		map<string, string> variableReplacements;
+		string returnVariable = fun.returnVariables[0].name;
 		for (size_t i = 0; i < funCall.arguments.size(); ++i)
-			variableReplacements[fun.arguments[i].name] = boost::get<Identifier>(funCall.arguments[i]).name;
-		variableReplacements[fun.returns[0].name] = newName(fun.name + "_" + fun.returns[0].name);
+			variableReplacements[fun.parameters[i].name] = boost::get<Identifier>(funCall.arguments[i]).name;
+		variableReplacements[returnVariable] = newName(fun.name + "_" + returnVariable);
 
 		prefixStatements.emplace_back(VariableDeclaration{
 			funCall.location,
-			{{funCall.location, variableReplacements[fun.returns[0].name], fun.returns[0].type}},
+			{{funCall.location, variableReplacements[returnVariable], fun.returnVariables[0].type}},
 			{}
 		});
 		prefixStatements.emplace_back(BodyCopier(m_nameDispenser, fun.name + "_", variableReplacements)(fun.body));
 		// TODO this may lead to infinite recursion.
 		// TODO this is does duplicate work, because it inlines after having copied
 		tryInline(prefixStatements.back());
-		_statement = Identifier{funCall.location, variableReplacements[fun.returns[0].name]};
+		_statement = Identifier{funCall.location, variableReplacements[returnVariable]};
 	}
 	return prefixStatements;
 }

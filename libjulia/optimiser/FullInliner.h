@@ -19,7 +19,7 @@
  */
 #pragma once
 
-#include <libjulia/Aliases.h>
+#include <libjulia/ASTDataForward.h>
 
 #include <libjulia/optimiser/ASTCopier.h>
 
